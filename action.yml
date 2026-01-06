@@ -1,5 +1,5 @@
-name: "general-cfileio-grader"
-description: "General C File I/O Grader"
+name: "general-cbinaryio-grader"
+description: "General C Binary I/O Grader"
 author: "DKU-IRDM-Classroom"
 
 inputs:
@@ -13,9 +13,6 @@ inputs:
   memory-limit:
     required: false
     default: '256m'
-  output-limit:
-    required: false
-    default: 1048576
 
 permissions:
   contents: read
@@ -138,11 +135,6 @@ runs:
           fi
           if [ ! -f "$HOME/workdir/${n}.out" ]; then
             echo "[Case ${n}] 형식 오류 (PE)"
-            continue
-          fi
-          BYTES=$(stat -c%s "$HOME/workdir/${n}.out")
-          if [ "$BYTES" -gt ${{ inputs.output-limit }} ]; then
-            echo "[Case ${n}] 출력 초과 (OLE)"
             continue
           fi
 
