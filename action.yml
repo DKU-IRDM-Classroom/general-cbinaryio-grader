@@ -1,0 +1,175 @@
+name: "general-cfileio-grader"
+description: "General C File I/O Grader"
+author: "DKU-IRDM-Classroom"
+
+inputs:
+  module-path:
+    required: true
+  total-cases:
+    required: true
+  time-limit:
+    required: false
+    default: 2
+  memory-limit:
+    required: false
+    default: '256m'
+  output-limit:
+    required: false
+    default: 1048576
+
+permissions:
+  contents: read
+  actions: read
+  checks: write
+
+runs:
+  using: "composite"
+  steps:
+
+    - name: 채점기 준비
+      id: prepare-grader
+      shell: bash
+      run: |
+        : 채점기 준비
+        set -euo pipefail
+
+        mkdir -p "$HOME/workdir"
+        chmod 777 "$HOME/workdir"
+
+    - name: 빌드 준비
+      id: prepare-build
+      shell: bash
+      run: |
+        : 빌드 준비
+        set -euo pipefail
+
+        if [ ! -f ./main.c ]; then
+          echo "형식 오류 (PE): main.c 파일 없음"
+          echo "::notice::점수 0/${{ inputs.total-cases }}"
+          echo "::notice title=Autograding report::{\"totalPoints\":0,\"maxPoints\":${{ inputs.total-cases }}}"
+          exit 2
+        fi
+
+    - name: 빌드
+      id: build
+      shell: bash
+      run: |
+        : 빌드
+        set -euo pipefail
+
+        cp ./main.c "$HOME/workdir/"
+
+        if gcc -O2 -std=c17 -o "$HOME/workdir/main" main.c -lm >/dev/null 2>/tmp/gcc.err; then
+          exit 0
+        else
+          echo "컴파일 오류 (CE)"
+          echo "::notice::점수 0/${{ inputs.total-cases }}"
+          echo "::notice title=Autograding report::{\"totalPoints\":0,\"maxPoints\":${{ inputs.total-cases }}}"
+          exit 2
+        fi
+
+    - name: 케이스 생성
+      id: generate-cases
+      shell: bash
+      env:
+        PYTHONPATH: "${{ inputs.module-path }}:${PYTHONPATH}"
+      run: |
+        : 케이스 생성
+        set -euo pipefail
+
+        python3 \
+          "${{ github.action_path }}/generate_cases.py" \
+          "$HOME/workdir" \
+          "${{ inputs.total-cases }}"
+
+    - name: 채점
+      id: grade
+      shell: bash
+      run: |
+        : 채점
+        set -euo pipefail
+
+        docker pull -q ubuntu:latest >/dev/null
+        docker run --rm ubuntu:latest bash -lc 'echo "grader ready"'
+
+        PASS=0
+
+        for n in $(seq 1 ${{ inputs.total-cases }}); do
+
+          NAME="grader-${n}-$$"
+
+          set +e
+          docker run \
+            --name "$NAME" \
+            --network none \
+            --cpus "1.0" \
+            --memory "${{ inputs.memory-limit }}" \
+            --memory-swap "${{ inputs.memory-limit }}" \
+            --pids-limit "128" \
+            --cap-drop ALL \
+            --security-opt no-new-privileges \
+            --tmpfs /tmp:rw,nosuid,nodev,noexec,size=64m \
+            -u "$(id -u):$(id -g)" \
+            -v "$HOME/workdir":/workdir \
+            -w /workdir \
+            -e n="$n" \
+            ubuntu:latest \
+            bash -lc 'timeout -k 1s ${{ inputs.time-limit }}s /workdir/main "${n}"' 2>/dev/null
+          RC=$?
+          set -e
+
+          OOM=false
+          EXIT=0
+          if docker inspect "$NAME" >/dev/null 2>&1; then
+            OOM=$(docker inspect -f '{{.State.OOMKilled}}' "$NAME")
+            EXIT=$(docker inspect -f '{{.State.ExitCode}}' "$NAME")
+          fi
+          docker rm -f "$NAME" >/dev/null 2>&1 || true
+
+          if [ "$OOM" = "true" ]; then
+            echo "[Case ${n}] 메모리 초과 (MLE)"
+            continue
+          elif [ "$EXIT" -eq 124 ]; then
+            echo "[Case ${n}] 시간 초과 (TLE)"
+            continue
+          elif [ ${RC} -ne 0 ] || [ ${EXIT} -ne 0 ]; then
+            echo "[Case ${n}] 실행 오류 (RE)"
+            continue
+          fi
+          if [ ! -f "$HOME/workdir/${n}.out" ]; then
+            echo "[Case ${n}] 형식 오류 (PE)"
+            continue
+          fi
+          BYTES=$(stat -c%s "$HOME/workdir/${n}.out")
+          if [ "$BYTES" -gt ${{ inputs.output-limit }} ]; then
+            echo "[Case ${n}] 출력 초과 (OLE)"
+            continue
+          fi
+
+          set +e
+          python3 \
+            "${{ github.action_path }}/compare.py" \
+            "$HOME/workdir/${n}.ans" \
+            "$HOME/workdir/${n}.out"
+          CMP=$?
+          set -e
+
+          if [ $CMP -eq 0 ]; then
+            echo "[Case ${n}] 정답 (AC)"
+            PASS=$((PASS+1))
+            continue
+          elif [ $CMP -eq 1 ]; then
+            echo "[Case ${n}] 오답 (WA)"
+            continue
+          elif [ $CMP -eq 2 ]; then
+            echo "[Case ${n}] 형식 오류 (PE)"
+            continue
+          else
+            echo "[Case ${n}] 내부 오류 (IE)"
+            continue
+          fi
+
+        done
+
+        echo "::notice::점수 ${PASS}/${{ inputs.total-cases }}"
+        echo "::notice title=Autograding report::{\"totalPoints\":${PASS},\"maxPoints\":${{ inputs.total-cases }}}"
